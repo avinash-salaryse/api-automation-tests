@@ -8,6 +8,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 # ── Server ────────────────────────────────────────────────────────────────────
 BASE_URL: str = os.environ.get("BASE_URL", "https://api.dev.salaryse.com").rstrip("/")
+ENV: str = os.environ.get("ENV", "dev").lower()  # allowed: dev, local
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 TEST_PHONE: str = os.environ.get("TEST_PHONE", "")
