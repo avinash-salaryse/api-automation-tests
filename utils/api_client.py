@@ -13,7 +13,9 @@ class ApiResponse:
     def __init__(self, response: requests.Response):
         self._response = response
         try:
-            self._body: dict = response.json()
+            body = response.json()
+            # Normalise non-dict bodies (e.g. top-level lists) so .get() calls never crash
+            self._body: dict = body if isinstance(body, dict) else {"data": body}
         except ValueError:
             self._body = {}
 
@@ -81,6 +83,7 @@ class SalarySeClient:
 
     def _call(self, method: str, path: str, **kwargs) -> ApiResponse:
         url = f"{settings.BASE_URL}{path}"
+        kwargs.setdefault("timeout", 30)
         response = self._session.request(method, url, **kwargs)
         return ApiResponse(response)
 
@@ -109,13 +112,14 @@ class SalarySeClient:
         base = settings.BASE_URL
 
         # Step 1 — request OTP (fire-and-forget; dev OTP is fixed)
-        requests.post(f"{base}/gw/v1/login", json={"phone": phone}, headers=headers)
+        requests.post(f"{base}/gw/v1/login", json={"phone": phone}, headers=headers, timeout=30)
 
         # Step 2 — validate OTP → receive AuthToken
         resp = requests.post(
             f"{base}/gw/v1/validate_otp",
             json={"phone": phone, "otp": otp},
             headers=headers,
+            timeout=30,
         )
         resp.raise_for_status()
         body = resp.json()

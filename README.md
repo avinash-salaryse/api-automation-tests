@@ -71,8 +71,9 @@ cp .env.example .env
 
 ### Finding test data (biller UUIDs)
 
-Run the discovery tests first with just `TEST_PHONE` set — they will print the
-category list and biller list. Pick UUIDs from that output and set them in `.env`.
+Run the discovery tests first with just `TEST_PHONE` set — they will hit the
+category and biller list endpoints. Run with `-v` to see the full output, then pick
+UUIDs from the response and set them in `.env`.
 
 ---
 
@@ -117,9 +118,10 @@ Login happens **once per test session** via the session-scoped `client` fixture 
 
 ```
 client (session)
-  └── validated_account (session)  ← calls validate-account once
-        └── fetched_bill (session) ← calls bill-fetch once
-              └── created_order (session) ← calls create-order once
+  ├── validated_account (session)  ← calls validate-account once
+  ├── fetched_bill (session)       ← calls bill-fetch once (independent of validated_account)
+  │     └── created_order (session) ← calls create-order once
+  └── prepaid_mobile (session)
 ```
 
 All API-calling fixtures are `scope="session"` — the gateway is hit once

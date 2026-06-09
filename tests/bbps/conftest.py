@@ -84,6 +84,15 @@ def fetched_bill(client, biller_ref_id, customer_params) -> dict:
         f"/gw/v1/bbps/billers/{biller_ref_id}/bill",
         payload={"customerParams": customer_params},
     )
+    _TRANSIENT_BILL_ERRORS = {
+        "BBPSERR001", "BILL_NOT_AVAILABLE", "ALL-SITE-DOWN-FOR-ROUTE",
+        "BILLER_NOT_AVAILABLE", "BILLER_TIMEOUT",
+    }
+    if resp.error_reason in _TRANSIENT_BILL_ERRORS:
+        pytest.skip(
+            f"Biller returned transient error {resp.error_reason} — "
+            "bill fetch not available right now"
+        )
     assert resp.ok, f"bill fetch failed: {resp}"
     assert resp.data.get("billReferenceId"), "No billReferenceId in response"
     return resp.data

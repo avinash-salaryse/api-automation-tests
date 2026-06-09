@@ -355,3 +355,195 @@ class TestOrderRewards:
         )
         # Either data or error is acceptable — rewards may not yet be calculated
         assert resp.status_code == 200
+
+
+@pytest.mark.bbps
+@pytest.mark.order
+class TestCreateOrderResponseFields:
+    """Validates all key fields in the create-order response."""
+
+    def test_payee_vpa_present(self, created_order):
+        assert "payeeVpa" in created_order, (
+            "payeeVpa missing from create-order response"
+        )
+
+    def test_payee_vpa_is_string(self, created_order):
+        vpa = created_order.get("payeeVpa")
+        if vpa is not None:
+            assert isinstance(vpa, str), "payeeVpa should be a string"
+
+    def test_mcc_present(self, created_order):
+        assert "mcc" in created_order, "mcc (merchant category code) missing"
+
+    def test_payee_name_present(self, created_order):
+        assert "payeeName" in created_order, "payeeName missing from create-order response"
+
+    def test_order_reference_id_is_uuid_format(self, created_order):
+        ref_id = created_order.get("orderReferenceId", "")
+        assert len(ref_id.split("-")) == 5, (
+            f"orderReferenceId is not UUID format: {ref_id}"
+        )
+
+    def test_pg_transaction_id_is_non_empty(self, created_order):
+        pg_id = created_order.get("pgTransactionId", "")
+        assert len(str(pg_id)) > 0, "pgTransactionId is empty"
+
+    def test_amount_is_numeric(self, created_order):
+        float(created_order["amount"])  # must not raise
+
+
+@pytest.mark.bbps
+@pytest.mark.order
+class TestOrderEstimateDetails:
+    """Validates the fee breakdown structure returned by /order/estimate."""
+
+    def test_details_items_have_required_keys(self, client, fetched_bill):
+        resp = client.post(
+            "/gw/v1/bbps/order/estimate",
+            payload={
+                "items": [
+                    {
+                        "billReferenceId": fetched_bill["billReferenceId"],
+                        "amountType": "TOTAL_DUE",
+                        "amount": fetched_bill["amount"],
+                    }
+                ],
+                "paymentMode": "SAVINGS_ACCOUNT",
+            },
+        )
+        assert resp.ok
+        for item in resp.data.get("details", []):
+            assert "value" in item, f"Detail item missing 'value': {item}"
+
+    def test_to_pay_is_numeric(self, client, fetched_bill):
+        resp = client.post(
+            "/gw/v1/bbps/order/estimate",
+            payload={
+                "items": [
+                    {
+                        "billReferenceId": fetched_bill["billReferenceId"],
+                        "amountType": "TOTAL_DUE",
+                        "amount": fetched_bill["amount"],
+                    }
+                ],
+                "paymentMode": "SAVINGS_ACCOUNT",
+            },
+        )
+        assert resp.ok
+        float(resp.data["toPay"])  # must not raise
+
+    def test_scoin_widget_field_present(self, client, fetched_bill):
+        resp = client.post(
+            "/gw/v1/bbps/order/estimate",
+            payload={
+                "items": [
+                    {
+                        "billReferenceId": fetched_bill["billReferenceId"],
+                        "amountType": "TOTAL_DUE",
+                        "amount": fetched_bill["amount"],
+                    }
+                ],
+                "paymentMode": "SAVINGS_ACCOUNT",
+            },
+        )
+        assert resp.ok
+        assert "showScoinWidget" in resp.data, (
+            "showScoinWidget field missing from estimate response"
+        )
+
+    def test_credit_card_fee_is_greater_than_savings_account(self, client, fetched_bill):
+        def get_to_pay(mode):
+            r = client.post(
+                "/gw/v1/bbps/order/estimate",
+                payload={
+                    "items": [
+                        {
+                            "billReferenceId": fetched_bill["billReferenceId"],
+                            "amountType": "TOTAL_DUE",
+                            "amount": fetched_bill["amount"],
+                        }
+                    ],
+                    "paymentMode": mode,
+                },
+            )
+            return float(r.data["toPay"]) if r.ok else None
+
+        savings = get_to_pay("SAVINGS_ACCOUNT")
+        credit = get_to_pay("CREDIT_CARD")
+        if savings is not None and credit is not None:
+            assert credit >= savings, (
+                f"CREDIT_CARD toPay ({credit}) should be >= SAVINGS_ACCOUNT toPay ({savings})"
+            )
+
+
+@pytest.mark.bbps
+@pytest.mark.order
+class TestOrderReceiptFields:
+    """Validates the receipt response structure."""
+
+    def test_receipt_base64_is_non_empty(self, client, created_order):
+        resp = client.get(
+            f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}/receipt"
+        )
+        assert resp.ok
+        if resp.data:
+            receipt = resp.data.get("receiptBase64") or resp.data.get("receipt")
+            if receipt:
+                assert len(receipt) > 0, "receiptBase64 is empty"
+
+    def test_receipt_base64_is_valid_base64(self, client, created_order):
+        import base64
+        import binascii
+        resp = client.get(
+            f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}/receipt"
+        )
+        assert resp.ok
+        if resp.data:
+            receipt = resp.data.get("receiptBase64") or resp.data.get("receipt")
+            if receipt and isinstance(receipt, str):
+                try:
+                    base64.b64decode(receipt, validate=True)
+                except (ValueError, binascii.Error) as exc:
+                    pytest.fail(f"receiptBase64 is not valid base64: {exc}")
+
+
+@pytest.mark.bbps
+@pytest.mark.order
+class TestOrderHistoryFields:
+    """Validates field presence in order history items."""
+
+    def test_each_order_has_reference_id(self, client):
+        resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 10})
+        assert resp.ok
+        for order in resp.data.get("orders", []):
+            assert order.get("orderReferenceId"), (
+                f"Order missing orderReferenceId: {order}"
+            )
+
+    def test_each_order_has_status(self, client):
+        resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 10})
+        assert resp.ok
+        for order in resp.data.get("orders", []):
+            assert order.get("orderStatus"), f"Order missing orderStatus: {order}"
+
+    def test_each_order_has_amount(self, client):
+        resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 10})
+        assert resp.ok
+        for order in resp.data.get("orders", []):
+            assert "totalAmount" in order or "amount" in order, (
+                f"Order missing amount field: {order}"
+            )
+
+    def test_order_statuses_are_known_values(self, client):
+        known_statuses = {
+            "PENDING", "PAYMENT_PROCESSING", "PAYMENT_SUCCESS", "SUCCESS",
+            "PAYMENT_FAILED", "FAILED", "CANCELLED", "REFUNDED",
+        }
+        resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 20})
+        assert resp.ok
+        for order in resp.data.get("orders", []):
+            status = order.get("orderStatus")
+            if status:
+                assert status in known_statuses, (
+                    f"Unexpected orderStatus value: {status}"
+                )

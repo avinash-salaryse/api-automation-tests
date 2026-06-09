@@ -131,3 +131,66 @@ class TestCubBillerDetails:
         resp = client.get("/gw/v1/bbps/cub/biller-details")
         # CUB biller may not be available for all users — either data or error is valid
         assert resp.status_code == 200
+
+    def test_data_or_error_present(self, client):
+        resp = client.get("/gw/v1/bbps/cub/biller-details")
+        assert resp.data is not None or resp.error is not None, (
+            "Response has neither data nor error"
+        )
+
+    def test_no_server_error(self, client):
+        resp = client.get("/gw/v1/bbps/cub/biller-details")
+        # Must not be a 5xx even if the user doesn't have a CUB account
+        assert resp.status_code < 500
+
+
+@pytest.mark.bbps
+@pytest.mark.bill_actions
+class TestDashboardStructure:
+    """Validates the dashboard response structure in detail."""
+
+    def test_dashboard_data_is_dict(self, client):
+        resp = client.get("/gw/v1/bbps/dashboard")
+        assert resp.ok
+        if resp.data is not None:
+            assert isinstance(resp.data, dict), "Dashboard data should be a dict"
+
+    def test_dashboard_response_consistent_across_calls(self, client):
+        resp1 = client.get("/gw/v1/bbps/dashboard")
+        resp2 = client.get("/gw/v1/bbps/dashboard")
+        assert resp1.status_code == resp2.status_code == 200
+        # Both calls should succeed without errors
+        assert resp1.error is None and resp2.error is None
+
+
+@pytest.mark.bbps
+@pytest.mark.bill_actions
+class TestMarkPaidIdempotency:
+    """Marking a bill as paid a second time should not cause a server error."""
+
+    @pytest.fixture(scope="class")
+    def bill_for_idempotency(self, client):
+        if not settings.BILLER_REF_ID or not settings.CUSTOMER_PARAMS:
+            pytest.skip("TEST_BILLER_REF_ID / TEST_CUSTOMER_PARAMS not set")
+        resp = client.post(
+            f"/gw/v1/bbps/billers/{settings.BILLER_REF_ID}/bill",
+            payload={"customerParams": settings.CUSTOMER_PARAMS},
+        )
+        if not resp.ok:
+            pytest.skip(f"Could not fetch a bill: {resp}")
+        return resp.data
+
+    def test_first_mark_paid_succeeds(self, client, bill_for_idempotency):
+        resp = client.post(
+            "/gw/v1/bbps/bills/mark-paid",
+            payload={"billReferenceId": bill_for_idempotency["billReferenceId"]},
+        )
+        assert resp.status_code == 200
+
+    def test_second_mark_paid_does_not_500(self, client, bill_for_idempotency):
+        # Second call on same bill — may return error or succeed, but must not 500
+        resp = client.post(
+            "/gw/v1/bbps/bills/mark-paid",
+            payload={"billReferenceId": bill_for_idempotency["billReferenceId"]},
+        )
+        assert resp.status_code < 500
