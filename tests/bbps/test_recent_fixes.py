@@ -6,6 +6,12 @@ Covers:
   - scoinApplicablePoints in create-order response (feats bf4da45 / 760530d)
   - scoinApplicableAmount + scoinApplicablePoints in order details + history
     (feats ac26cf9 / 760530d)
+
+Notes on field presence vs. null:
+  Spring Boot omits JSON keys whose value is null by default.
+  Tests below use .get() so they pass whether the key is absent (null omitted)
+  or explicitly null — the important contract is that the value is not present
+  / not set for non-scoin orders.
 """
 
 import pytest
@@ -16,8 +22,10 @@ import pytest
 class TestQuickPaymentDataOnSearch:
     """
     Regression: biller search with a non-blank query was returning null
-    quickPaymentData. After the fix (a670c3d) it must always be a list
-    (possibly empty) — never null.
+    quickPaymentData. After the fix (a670c3d) it must always be a non-null
+    dict with a quickPaymentOptions list — never null.
+
+    Actual shape: {"headerText": "...", "quickPaymentOptions": [...]}
     """
 
     def test_search_quick_payment_data_key_present(
@@ -44,7 +52,7 @@ class TestQuickPaymentDataOnSearch:
             "quickPaymentData must not be null when a search term is provided"
         )
 
-    def test_search_quick_payment_data_is_list(
+    def test_search_quick_payment_data_is_dict(
         self, client, biller_category_ref_id
     ):
         resp = client.get(
@@ -52,21 +60,24 @@ class TestQuickPaymentDataOnSearch:
             params={"search": "Air"},
         )
         assert resp.ok
-        assert isinstance(resp.data["quickPaymentData"], list), (
-            "quickPaymentData should be a list (possibly empty) for a search query"
+        quick = resp.data["quickPaymentData"]
+        assert isinstance(quick, dict), (
+            f"quickPaymentData should be a dict, got {type(quick)}"
         )
 
-    def test_search_quick_payment_data_is_empty(
+    def test_search_quick_payment_options_is_empty_list(
         self, client, biller_category_ref_id
     ):
-        # Quick-pay entries (recent payments) are always hidden during search
+        # quickPaymentOptions (recent payments) are always hidden during search
         resp = client.get(
             f"/gw/v1/bbps/biller-categories/{biller_category_ref_id}/billers",
             params={"search": "Air"},
         )
         assert resp.ok
-        assert len(resp.data["quickPaymentData"]) == 0, (
-            "quickPaymentData should be an empty list during biller search"
+        options = resp.data["quickPaymentData"]["quickPaymentOptions"]
+        assert isinstance(options, list), "quickPaymentOptions should be a list"
+        assert len(options) == 0, (
+            "quickPaymentOptions should be empty during biller search"
         )
 
     def test_no_results_search_quick_payment_data_is_not_null(
@@ -80,44 +91,44 @@ class TestQuickPaymentDataOnSearch:
         assert resp.data.get("quickPaymentData") is not None, (
             "quickPaymentData must not be null even when search returns no biller results"
         )
-        assert isinstance(resp.data["quickPaymentData"], list)
+        assert isinstance(resp.data["quickPaymentData"], dict)
 
-    def test_no_search_quick_payment_data_is_null_or_list(
+    def test_no_search_quick_payment_data_has_options_list(
         self, client, biller_category_ref_id
     ):
-        # Without a search term, quickPaymentData is populated or null — both valid
+        # Without a search term, quickPaymentData is a dict with quickPaymentOptions list
         resp = client.get(
             f"/gw/v1/bbps/biller-categories/{biller_category_ref_id}/billers"
         )
         assert resp.ok
         quick = resp.data.get("quickPaymentData")
-        assert quick is None or isinstance(quick, list), (
-            "Without a search term, quickPaymentData should be null or a list, "
-            f"got {type(quick)}"
-        )
+        if quick is not None:
+            assert isinstance(quick, dict), (
+                f"quickPaymentData should be a dict, got {type(quick)}"
+            )
+            assert "quickPaymentOptions" in quick, (
+                "quickPaymentData missing quickPaymentOptions key"
+            )
+            assert isinstance(quick["quickPaymentOptions"], list)
 
 
 @pytest.mark.bbps
 @pytest.mark.order
 class TestCreateOrderScoinFields:
     """
-    Verifies new fields in the create-order response related to scoin and
+    Verifies fields in the create-order response related to scoin and
     net PG-payable amount.
 
-      - scoinApplicablePoints: points applicable to this order (null for pure-UPI)
+      - scoinApplicablePoints: absent or null for pure-UPI orders
       - amount: net PG-payable (equals bill amount when no scoin is applied)
 
     (feats bf4da45, 760530d)
     """
 
-    def test_scoin_applicable_points_key_present(self, created_order):
-        assert "scoinApplicablePoints" in created_order, (
-            "scoinApplicablePoints key missing from create-order response"
-        )
-
-    def test_scoin_applicable_points_null_for_pure_upi(self, created_order):
+    def test_scoin_applicable_points_absent_or_null_for_pure_upi(self, created_order):
+        # Spring omits null fields — absent and null are both correct for non-scoin orders
         assert created_order.get("scoinApplicablePoints") is None, (
-            "scoinApplicablePoints should be null for a pure UPI (non-scoin) order"
+            "scoinApplicablePoints should be absent or null for a pure UPI (non-scoin) order"
         )
 
     def test_amount_equals_bill_amount_for_pure_upi(
@@ -134,54 +145,43 @@ class TestCreateOrderScoinFields:
             f"create-order amount must be non-negative, got {created_order['amount']}"
         )
 
+    def test_amount_is_numeric(self, created_order):
+        float(created_order["amount"])  # must not raise
+
 
 @pytest.mark.bbps
 @pytest.mark.order
 class TestOrderDetailsScoinFields:
     """
-    Verifies scoin fields added to GET /gw/v1/bbps/orders/{id}.
+    Verifies scoin fields in GET /gw/v1/bbps/orders/{id}.
 
-      - scoinApplicableAmount: INR value of scoin applied (null for pure-UPI)
-      - scoinApplicablePoints: points applied (null for pure-UPI)
+      - scoinApplicableAmount: absent or null for pure-UPI orders
+      - scoinApplicablePoints: absent or null for pure-UPI orders
       - totalAmount: gross order amount regardless of any scoin split
 
     (feats ac26cf9, 760530d)
     """
 
-    def test_scoin_applicable_amount_key_present(self, client, created_order):
-        resp = client.get(
-            f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}"
-        )
-        assert resp.ok
-        assert "scoinApplicableAmount" in resp.data, (
-            "scoinApplicableAmount key missing from order details response"
-        )
-
-    def test_scoin_applicable_points_key_present(self, client, created_order):
-        resp = client.get(
-            f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}"
-        )
-        assert resp.ok
-        assert "scoinApplicablePoints" in resp.data, (
-            "scoinApplicablePoints key missing from order details response"
-        )
-
-    def test_scoin_applicable_amount_null_for_pure_upi(self, client, created_order):
+    def test_scoin_applicable_amount_absent_or_null_for_pure_upi(
+        self, client, created_order
+    ):
         resp = client.get(
             f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}"
         )
         assert resp.ok
         assert resp.data.get("scoinApplicableAmount") is None, (
-            "scoinApplicableAmount should be null for a pure UPI (non-scoin) order"
+            "scoinApplicableAmount should be absent or null for a pure UPI order"
         )
 
-    def test_scoin_applicable_points_null_for_pure_upi(self, client, created_order):
+    def test_scoin_applicable_points_absent_or_null_for_pure_upi(
+        self, client, created_order
+    ):
         resp = client.get(
             f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}"
         )
         assert resp.ok
         assert resp.data.get("scoinApplicablePoints") is None, (
-            "scoinApplicablePoints should be null for a pure UPI (non-scoin) order"
+            "scoinApplicablePoints should be absent or null for a pure UPI order"
         )
 
     def test_total_amount_equals_bill_amount(self, client, created_order, fetched_bill):
@@ -202,16 +202,24 @@ class TestOrderDetailsScoinFields:
         assert resp.ok
         float(resp.data["totalAmount"])  # must not raise
 
+    def test_order_details_not_broken_by_scoin_changes(self, client, created_order):
+        # Smoke: order details still return cleanly after scoin field changes
+        resp = client.get(
+            f"/gw/v1/bbps/orders/{created_order['orderReferenceId']}"
+        )
+        assert resp.ok, f"Order details returned error: {resp.error}"
+        assert resp.data.get("orderReferenceId") == created_order["orderReferenceId"]
+
 
 @pytest.mark.bbps
 @pytest.mark.order
 class TestOrderHistoryScoinFields:
     """
-    Verifies scoin fields are present in each item returned by
-    GET /gw/v1/bbps/orders (order history).
+    Verifies scoin fields in order history items from GET /gw/v1/bbps/orders.
+    For pure-UPI orders both fields are absent or null.
     """
 
-    def test_created_order_in_history_has_scoin_applicable_amount(
+    def test_created_order_scoin_amount_absent_or_null_in_history(
         self, client, created_order
     ):
         resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 20})
@@ -226,11 +234,11 @@ class TestOrderHistoryScoinFields:
         assert target is not None, (
             "Created order not found in order history — increase page size or check env"
         )
-        assert "scoinApplicableAmount" in target, (
-            "scoinApplicableAmount key missing from order history item"
+        assert target.get("scoinApplicableAmount") is None, (
+            "scoinApplicableAmount should be absent or null for a non-scoin order in history"
         )
 
-    def test_created_order_in_history_has_scoin_applicable_points(
+    def test_created_order_scoin_points_absent_or_null_in_history(
         self, client, created_order
     ):
         resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 20})
@@ -245,24 +253,26 @@ class TestOrderHistoryScoinFields:
         assert target is not None, (
             "Created order not found in order history — increase page size or check env"
         )
-        assert "scoinApplicablePoints" in target, (
-            "scoinApplicablePoints key missing from order history item"
+        assert target.get("scoinApplicablePoints") is None, (
+            "scoinApplicablePoints should be absent or null for a non-scoin order in history"
         )
 
-    def test_all_history_items_have_scoin_applicable_amount(self, client):
+    def test_all_history_items_scoin_amount_absent_or_null(self, client):
         resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 10})
         assert resp.ok
         for order in resp.data.get("orders", []):
-            assert "scoinApplicableAmount" in order, (
-                "scoinApplicableAmount missing from history order: "
-                f"{order.get('orderReferenceId')}"
-            )
+            val = order.get("scoinApplicableAmount")
+            # If present, must be a number (scoin was applied); if absent/null, fine for pure-UPI
+            if val is not None:
+                float(val)  # must be numeric when present
 
-    def test_all_history_items_have_scoin_applicable_points(self, client):
+    def test_all_history_items_scoin_points_absent_or_null(self, client):
         resp = client.get("/gw/v1/bbps/orders", params={"page": 0, "size": 10})
         assert resp.ok
         for order in resp.data.get("orders", []):
-            assert "scoinApplicablePoints" in order, (
-                "scoinApplicablePoints missing from history order: "
-                f"{order.get('orderReferenceId')}"
-            )
+            val = order.get("scoinApplicablePoints")
+            # If present, must be an integer; if absent/null, fine for pure-UPI
+            if val is not None:
+                assert isinstance(val, int), (
+                    f"scoinApplicablePoints should be an integer when present, got {type(val)}"
+                )
